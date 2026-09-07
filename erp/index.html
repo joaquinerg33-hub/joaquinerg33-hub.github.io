@@ -1,0 +1,883 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ERP · Solicitudes de Materiales</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap');
+  body { font-family: 'Inter', sans-serif; background:#0A0D14; margin:0; }
+  .font-display { font-family: 'Space Grotesk', sans-serif; }
+  .font-mono { font-family: 'IBM Plex Mono', monospace; }
+  ::-webkit-scrollbar { width:8px; height:8px; }
+  ::-webkit-scrollbar-thumb { background:#2E3547; border-radius:8px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useCallback, useRef } = React;
+
+/* ============================================================================
+   Conexión a Supabase (mismo proyecto que CANTERA — un solo lugar de login
+   para toda la empresa; cada módulo del ERP vive en sus propias tablas).
+   La "anon key" es pública por diseño: lo que protege los datos de verdad es
+   la Seguridad a Nivel de Fila (RLS) definida en erp/sql/001_schema.sql.
+============================================================================ */
+const SUPABASE_URL = 'https://rosrayeqyjrouktfctbs.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_57RXaNUwrEmzxJF-TiTs6w_8WFD75sv';
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+/* ---------------- Catálogos ---------------- */
+const ROLE_LABEL = { admin:'Administrador', logistica:'Logística', gerente_operaciones:'Gerente de Operaciones', residente:'Residente de obra', lectura:'Solo lectura' };
+const ROLES = Object.keys(ROLE_LABEL);
+const ESTADO_LABEL = { borrador:'Borrador', enviada:'Enviada', rechazada:'Rechazada', aprobada:'Aprobada', en_proceso:'En proceso', atendida:'Atendida', cerrada:'Cerrada' };
+const ESTADO_STYLE = {
+  borrador:'bg-slate-500/10 text-slate-300 border-slate-500/30',
+  enviada:'bg-blue-500/10 text-blue-300 border-blue-500/30',
+  rechazada:'bg-red-500/10 text-red-300 border-red-500/30',
+  aprobada:'bg-emerald-500/10 text-emerald-300 border-emerald-500/30',
+  en_proceso:'bg-amber-500/10 text-amber-300 border-amber-500/30',
+  atendida:'bg-cyan-500/10 text-cyan-300 border-cyan-500/30',
+  cerrada:'bg-[#2E3547]/40 text-[#8B92A5] border-[#2E3547]',
+};
+
+/* ---------------- Componentes de apoyo (mismo look que CANTERA) ---------------- */
+function Badge({children, className=''}){ return <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium border whitespace-nowrap ${className}`}>{children}</span>; }
+function EstadoBadge({estado}){ return <Badge className={ESTADO_STYLE[estado]||''}>{ESTADO_LABEL[estado]||estado}</Badge>; }
+function RolBadge({rol}){ return <Badge className="bg-[#E1602A]/10 text-[#E1602A] border-[#E1602A]/30">{ROLE_LABEL[rol]||rol}</Badge>; }
+
+function Modal({title, onClose, children, wide}){
+  return (
+    <div className="fixed inset-0 z-[2000] flex items-start justify-center overflow-y-auto bg-slate-900/50 backdrop-blur-sm p-4 sm:p-8" onClick={onClose}>
+      <div className={`bg-[#141821] rounded-xl shadow-2xl w-full ${wide?'max-w-3xl':'max-w-lg'} my-4 border border-[#232838]`} onClick={e=>e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[#232838]">
+          <h3 className="font-display font-semibold text-[#EDEFF3]">{title}</h3>
+          <button onClick={onClose} className="text-[#5C6376] hover:text-[#DADDE5] text-xl leading-none">✕</button>
+        </div>
+        <div className="p-5">{children}</div>
+      </div>
+    </div>
+  );
+}
+function Field({label, children, required, hint}){
+  return <label className="block mb-3">
+    <span className="block text-xs font-medium text-[#8B92A5] mb-1 uppercase tracking-wide">{label} {required && <span className="text-orange-400">*</span>}</span>
+    {children}
+    {hint && <span className="block text-[11px] text-[#5C6376] mt-1">{hint}</span>}
+  </label>;
+}
+const inputCls = "w-full bg-[#0D1119] border border-[#2E3547] text-[#EDEFF3] placeholder-[#5C6376] rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#E1602A] focus:border-transparent";
+const btnPrimary = "px-3 py-2 text-sm rounded-lg text-white font-medium bg-[#E1602A] hover:bg-[#c95420] disabled:opacity-40 disabled:cursor-not-allowed";
+const btnGhost = "px-3 py-2 text-sm rounded-lg border border-[#2E3547] text-[#B4B9C6] hover:bg-white/5 disabled:opacity-40 disabled:cursor-not-allowed";
+const btnDanger = "px-3 py-2 text-sm rounded-lg text-white font-medium bg-red-600/80 hover:bg-red-600 disabled:opacity-40 disabled:cursor-not-allowed";
+
+function timeAgo(iso){
+  if(!iso) return '';
+  const d = new Date(iso), s = Math.floor((Date.now()-d.getTime())/1000);
+  if(s<60) return 'hace un momento';
+  if(s<3600) return `hace ${Math.floor(s/60)} min`;
+  if(s<86400) return `hace ${Math.floor(s/3600)} h`;
+  if(s<86400*30) return `hace ${Math.floor(s/86400)} d`;
+  return d.toLocaleDateString('es-PE', {day:'2-digit', month:'short', year:'numeric'});
+}
+function fmtDate(iso){ if(!iso) return '—'; return new Date(iso+'T00:00:00').toLocaleDateString('es-PE', {day:'2-digit', month:'short', year:'numeric'}); }
+function ErrorBanner({error}){ if(!error) return null; return <div className="mb-3 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-sm">{error}</div>; }
+
+/* ============================================================================
+   Autenticación
+============================================================================ */
+function AuthScreen(){
+  const [email,setEmail] = useState('');
+  const [password,setPassword] = useState('');
+  const [error,setError] = useState('');
+  const [info,setInfo] = useState('');
+  const [loading,setLoading] = useState(false);
+  const [modoReset,setModoReset] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault(); setError(''); setInfo(''); setLoading(true);
+    try {
+      if(modoReset){
+        const { error } = await sb.auth.resetPasswordForEmail(email.trim());
+        if(error) throw error;
+        setInfo('Si ese correo tiene una cuenta, te llegó un enlace para restablecer tu contraseña.');
+      } else {
+        const { error } = await sb.auth.signInWithPassword({ email: email.trim(), password });
+        if(error) throw error;
+      }
+    } catch(err){ setError(err.message || 'No se pudo completar la acción.'); }
+    setLoading(false);
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-[#0A0D14] px-4">
+      <div className="w-full max-w-sm bg-[#141821] border border-[#232838] rounded-xl p-6">
+        <h1 className="font-display text-xl font-bold text-[#EDEFF3] mb-1">ERP · Solicitudes de Materiales</h1>
+        <p className="text-xs text-[#8B92A5] mb-5">Ingresa con el correo corporativo que te asignaron.</p>
+        <ErrorBanner error={error}/>
+        {info && <div className="mb-3 px-3 py-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-sm">{info}</div>}
+        <form onSubmit={submit}>
+          <Field label="Correo" required><input type="email" required className={inputCls} value={email} onChange={e=>setEmail(e.target.value)} placeholder="nombre@empresa.com"/></Field>
+          {!modoReset && <Field label="Contraseña" required><input type="password" required className={inputCls} value={password} onChange={e=>setPassword(e.target.value)}/></Field>}
+          <button type="submit" disabled={loading} className={btnPrimary+" w-full mt-1"}>{loading?'Un momento…':(modoReset?'Enviar enlace':'Ingresar')}</button>
+        </form>
+        <button onClick={()=>{setModoReset(m=>!m); setError(''); setInfo('');}} className="mt-3 text-xs text-[#8B92A5] hover:text-[#E1602A] underline">
+          {modoReset?'Volver a iniciar sesión':'Olvidé mi contraseña'}
+        </button>
+        <p className="mt-5 text-[11px] text-[#5C6376]">¿No tienes cuenta todavía? Pídele a tu administrador que te invite desde el panel de Usuarios.</p>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================================
+   Datos: perfil, catálogos, solicitudes, notificaciones (con tiempo real)
+============================================================================ */
+function useProfile(session){
+  const [profile,setProfile] = useState(undefined); // undefined=cargando, null=no existe
+  useEffect(()=>{
+    if(!session){ setProfile(null); return; }
+    let activo = true;
+    sb.from('profiles').select('*').eq('id', session.user.id).maybeSingle().then(({data,error})=>{
+      if(!activo) return;
+      if(error){ console.error(error); setProfile(null); return; }
+      setProfile(data||null);
+    });
+    return ()=>{ activo=false; };
+  }, [session && session.user.id]);
+  return [profile, setProfile];
+}
+
+function useCatalogos(session){
+  const [obras,setObras] = useState([]);
+  const [perfiles,setPerfiles] = useState([]);
+  const cargar = useCallback(async ()=>{
+    const [{data:o}, {data:p}] = await Promise.all([
+      sb.from('obras').select('*').order('codigo'),
+      sb.from('profiles').select('*').order('full_name'),
+    ]);
+    setObras(o||[]); setPerfiles(p||[]);
+  }, []);
+  useEffect(()=>{ if(session) cargar(); }, [session, cargar]);
+  const perfilesPorId = useMemo(()=>Object.fromEntries(perfiles.map(p=>[p.id,p])), [perfiles]);
+  return { obras, perfiles, perfilesPorId, recargar: cargar };
+}
+
+function useMisObraIds(profile){
+  const [ids,setIds] = useState(new Set());
+  useEffect(()=>{
+    if(!profile) return;
+    sb.from('obra_usuarios').select('obra_id').eq('user_id', profile.id).then(({data})=>{
+      setIds(new Set((data||[]).map(r=>r.obra_id)));
+    });
+  }, [profile && profile.id]);
+  return ids;
+}
+
+function useNotificaciones(userId){
+  const [items,setItems] = useState([]);
+  const cargar = useCallback(async ()=>{
+    if(!userId) return;
+    const { data } = await sb.from('notificaciones').select('*').eq('user_id', userId).order('created_at', {ascending:false}).limit(50);
+    setItems(data||[]);
+  }, [userId]);
+  useEffect(()=>{ cargar(); }, [cargar]);
+  useEffect(()=>{
+    if(!userId) return;
+    const ch = sb.channel('notif-'+userId)
+      .on('postgres_changes', {event:'INSERT', schema:'public', table:'notificaciones', filter:`user_id=eq.${userId}`}, payload=>{
+        setItems(prev=>[payload.new, ...prev]);
+      })
+      .subscribe();
+    return ()=>{ sb.removeChannel(ch); };
+  }, [userId]);
+  const marcarLeidas = async (ids) => {
+    setItems(prev=>prev.map(n=> (!ids || ids.includes(n.id)) ? {...n, leida:true} : n));
+    await sb.rpc('marcar_notificaciones_leidas', { p_ids: ids||null });
+  };
+  const noLeidas = items.filter(n=>!n.leida).length;
+  return { items, noLeidas, marcarLeidas, recargar: cargar };
+}
+
+function useSolicitudes(profile){
+  const [solicitudes,setSolicitudes] = useState([]);
+  const [loading,setLoading] = useState(true);
+  const cargar = useCallback(async ()=>{
+    setLoading(true);
+    const { data, error } = await sb.from('solicitudes').select('*, solicitud_items(count)').order('created_at', {ascending:false});
+    if(error) console.error(error);
+    setSolicitudes(data||[]);
+    setLoading(false);
+  }, []);
+  useEffect(()=>{ if(profile) cargar(); }, [profile, cargar]);
+  useEffect(()=>{
+    if(!profile) return;
+    const ch = sb.channel('solicitudes-list')
+      .on('postgres_changes', {event:'*', schema:'public', table:'solicitudes'}, ()=>cargar())
+      .subscribe();
+    return ()=>{ sb.removeChannel(ch); };
+  }, [profile, cargar]);
+  return { solicitudes, loading, recargar: cargar };
+}
+
+/* Para cada rol, ¿qué solicitudes están "esperando su acción"? */
+function pendientePara(sol, profile){
+  if(!profile) return false;
+  if(profile.role==='gerente_operaciones' || profile.role==='admin') return sol.estado==='enviada';
+  if(profile.role==='logistica') return sol.estado==='aprobada';
+  if(profile.role==='residente') return sol.estado==='rechazada' && sol.solicitante_id===profile.id;
+  return false;
+}
+
+/* ============================================================================
+   Campana de notificaciones
+============================================================================ */
+function NotifBell({notifs, onAbrirSolicitud}){
+  const [abierto,setAbierto] = useState(false);
+  const ref = useRef(null);
+  useEffect(()=>{
+    const onClick = (e) => { if(ref.current && !ref.current.contains(e.target)) setAbierto(false); };
+    document.addEventListener('mousedown', onClick);
+    return ()=>document.removeEventListener('mousedown', onClick);
+  }, []);
+  return (
+    <div className="relative" ref={ref}>
+      <button onClick={()=>setAbierto(a=>!a)} className="relative w-9 h-9 flex items-center justify-center rounded-lg border border-[#2E3547] text-[#B4B9C6] hover:bg-white/5">
+        🔔
+        {notifs.noLeidas>0 && <span className="absolute -top-1 -right-1 bg-[#E1602A] text-white text-[10px] font-bold rounded-full min-w-[16px] h-4 px-1 flex items-center justify-center">{notifs.noLeidas>9?'9+':notifs.noLeidas}</span>}
+      </button>
+      {abierto && (
+        <div className="absolute right-0 mt-2 w-80 max-h-96 overflow-y-auto bg-[#141821] border border-[#232838] rounded-xl shadow-2xl z-50">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-[#232838]">
+            <span className="text-sm font-semibold text-[#EDEFF3]">Notificaciones</span>
+            {notifs.noLeidas>0 && <button onClick={()=>notifs.marcarLeidas()} className="text-xs text-[#E1602A] hover:underline">Marcar todas leídas</button>}
+          </div>
+          {notifs.items.length===0 && <div className="px-4 py-8 text-center text-[#5C6376] text-sm">Sin notificaciones todavía.</div>}
+          {notifs.items.map(n=>(
+            <button key={n.id} onClick={()=>{ if(!n.leida) notifs.marcarLeidas([n.id]); setAbierto(false); onAbrirSolicitud(n.solicitud_id); }}
+              className={`block w-full text-left px-4 py-3 border-b border-[#1C2130] hover:bg-white/5 ${!n.leida?'bg-[#E1602A]/5':''}`}>
+              <p className="text-sm text-[#DADDE5]">{!n.leida && <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#E1602A] mr-1.5 align-middle"></span>}{n.mensaje}</p>
+              <p className="text-[11px] text-[#5C6376] mt-0.5">{timeAgo(n.created_at)}</p>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================================
+   Nueva solicitud
+============================================================================ */
+function nuevoItem(){ return { _key: Math.random().toString(36).slice(2), item_codigo:'', descripcion:'', unidad:'und', categoria:'', cantidad_solicitada:'' }; }
+
+function NuevaSolicitudModal({profile, obrasDisponibles, onClose, onCreated}){
+  const [obraId,setObraId] = useState(obrasDisponibles[0]?.id || '');
+  const [tipo,setTipo] = useState('materiales');
+  const [fechaRequerida,setFechaRequerida] = useState('');
+  const [items,setItems] = useState([nuevoItem()]);
+  const [error,setError] = useState('');
+  const [enviando,setEnviando] = useState(false);
+
+  const actualizarItem = (key, campo, valor) => setItems(prev=>prev.map(it=>it._key===key?{...it,[campo]:valor}:it));
+  const quitarItem = (key) => setItems(prev=>prev.filter(it=>it._key!==key));
+
+  const guardar = async (enviarAlTerminar) => {
+    setError('');
+    const validos = items.filter(it=>it.descripcion.trim() && Number(it.cantidad_solicitada)>0);
+    if(!obraId){ setError('Selecciona una obra / centro de costo.'); return; }
+    if(validos.length===0){ setError('Agrega al menos un ítem con descripción y cantidad.'); return; }
+    setEnviando(true);
+    try {
+      const { data: sol, error: e1 } = await sb.from('solicitudes').insert({
+        obra_id: obraId, solicitante_id: profile.id, tipo, fecha_requerida: fechaRequerida || null, estado:'borrador',
+      }).select().single();
+      if(e1) throw e1;
+      const { error: e2 } = await sb.from('solicitud_items').insert(validos.map(it=>({
+        solicitud_id: sol.id, item_codigo: it.item_codigo||null, descripcion: it.descripcion.trim(),
+        unidad: it.unidad||'und', categoria: it.categoria||null, cantidad_solicitada: Number(it.cantidad_solicitada),
+      })));
+      if(e2) throw e2;
+      if(enviarAlTerminar){
+        const { error: e3 } = await sb.rpc('enviar_solicitud', { p_solicitud_id: sol.id });
+        if(e3) throw e3;
+      }
+      onCreated(sol.id);
+    } catch(err){ setError(err.message || 'No se pudo crear la solicitud.'); }
+    setEnviando(false);
+  };
+
+  return (
+    <Modal title="Nueva solicitud de materiales" onClose={onClose} wide>
+      <ErrorBanner error={error}/>
+      <div className="grid grid-cols-3 gap-3">
+        <Field label="Obra / centro de costo" required>
+          <select className={inputCls} value={obraId} onChange={e=>setObraId(e.target.value)}>
+            {obrasDisponibles.length===0 && <option value="">— No tienes obras asignadas —</option>}
+            {obrasDisponibles.map(o=><option key={o.id} value={o.id}>{o.codigo} — {o.nombre}</option>)}
+          </select>
+        </Field>
+        <Field label="Tipo">
+          <select className={inputCls} value={tipo} onChange={e=>setTipo(e.target.value)}>
+            <option value="materiales">Materiales</option>
+            <option value="herramientas">Herramientas</option>
+            <option value="epp">EPP / Seguridad</option>
+            <option value="servicios">Servicios</option>
+          </select>
+        </Field>
+        <Field label="Fecha requerida"><input type="date" className={inputCls} value={fechaRequerida} onChange={e=>setFechaRequerida(e.target.value)}/></Field>
+      </div>
+
+      <div className="mt-2 mb-2 flex items-center justify-between">
+        <span className="text-xs font-medium text-[#8B92A5] uppercase tracking-wide">Ítems</span>
+        <button type="button" onClick={()=>setItems(prev=>[...prev, nuevoItem()])} className="text-xs text-[#E1602A] hover:underline">+ Agregar ítem</button>
+      </div>
+      <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+        {items.map(it=>(
+          <div key={it._key} className="grid grid-cols-12 gap-2 items-center bg-[#0D1119] border border-[#2E3547] rounded-lg p-2">
+            <input className={inputCls+' col-span-4'} placeholder="Descripción" value={it.descripcion} onChange={e=>actualizarItem(it._key,'descripcion',e.target.value)}/>
+            <input className={inputCls+' col-span-2'} placeholder="Código" value={it.item_codigo} onChange={e=>actualizarItem(it._key,'item_codigo',e.target.value)}/>
+            <input className={inputCls+' col-span-2'} type="number" min="0" step="0.01" placeholder="Cantidad" value={it.cantidad_solicitada} onChange={e=>actualizarItem(it._key,'cantidad_solicitada',e.target.value)}/>
+            <input className={inputCls+' col-span-2'} placeholder="Unidad" value={it.unidad} onChange={e=>actualizarItem(it._key,'unidad',e.target.value)}/>
+            <input className={inputCls+' col-span-1'} placeholder="Categoría" value={it.categoria} onChange={e=>actualizarItem(it._key,'categoria',e.target.value)}/>
+            <button type="button" onClick={()=>quitarItem(it._key)} className="col-span-1 text-[#5C6376] hover:text-red-400 text-lg leading-none">✕</button>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex justify-end gap-2 mt-5">
+        <button disabled={enviando} onClick={onClose} className={btnGhost}>Cancelar</button>
+        <button disabled={enviando} onClick={()=>guardar(false)} className={btnGhost}>Guardar borrador</button>
+        <button disabled={enviando} onClick={()=>guardar(true)} className={btnPrimary}>Enviar a revisión</button>
+      </div>
+    </Modal>
+  );
+}
+
+/* ============================================================================
+   Listado de solicitudes
+============================================================================ */
+function SolicitudesListView({profile, solicitudes, loading, obrasPorId, perfilesPorId, onAbrir, onNueva}){
+  const [filtro,setFiltro] = useState('todas');
+  const puedeCrear = ['residente','admin'].includes(profile.role);
+
+  const visibles = useMemo(()=>{
+    if(filtro==='todas') return solicitudes;
+    if(filtro==='pendientes') return solicitudes.filter(s=>pendientePara(s, profile));
+    return solicitudes.filter(s=>s.estado===filtro);
+  }, [solicitudes, filtro, profile]);
+
+  const tabs = [
+    {id:'todas', label:'Todas'},
+    {id:'pendientes', label:'⚡ Pendientes para ti'},
+    {id:'enviada', label:ESTADO_LABEL.enviada},
+    {id:'aprobada', label:ESTADO_LABEL.aprobada},
+    {id:'en_proceso', label:ESTADO_LABEL.en_proceso},
+    {id:'rechazada', label:ESTADO_LABEL.rechazada},
+  ];
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex flex-wrap gap-2">
+          {tabs.map(t=>(
+            <button key={t.id} onClick={()=>setFiltro(t.id)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium border ${filtro===t.id?'bg-[#E1602A] text-white border-[#E1602A]':'border-[#2E3547] text-[#B4B9C6] hover:bg-white/5'}`}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+        {puedeCrear && <button onClick={onNueva} className={btnPrimary}>+ Nueva solicitud</button>}
+      </div>
+
+      {loading && <div className="text-center text-[#5C6376] py-10 text-sm">Cargando…</div>}
+      {!loading && visibles.length===0 && (
+        <div className="bg-[#141821] border border-dashed border-[#2E3547] rounded-xl p-10 text-center text-[#5C6376] text-sm">No hay solicitudes en esta vista.</div>
+      )}
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        {visibles.map(s=>{
+          const obra = obrasPorId[s.obra_id];
+          const solicitante = perfilesPorId[s.solicitante_id];
+          const urgente = pendientePara(s, profile);
+          return (
+            <button key={s.id} onClick={()=>onAbrir(s.id)}
+              className={`text-left bg-[#141821] border rounded-xl p-4 hover:border-[#E1602A]/50 transition ${urgente?'border-[#E1602A]/60':'border-[#232838]'}`}>
+              <div className="flex items-center justify-between mb-1">
+                <span className="font-display font-semibold text-[#EDEFF3]">N°{s.numero} · {obra?obra.codigo:'—'}</span>
+                <EstadoBadge estado={s.estado}/>
+              </div>
+              <p className="text-xs text-[#8B92A5] mb-2 truncate">{obra?obra.nombre:'Obra eliminada'}</p>
+              <p className="text-xs text-[#B4B9C6]">👤 {solicitante?(solicitante.full_name||solicitante.email):'—'}</p>
+              <div className="flex items-center justify-between mt-2 text-[11px] text-[#5C6376]">
+                <span>{(s.solicitud_items?.[0]?.count)||0} ítem(s) · {s.fecha_requerida?('req. '+fmtDate(s.fecha_requerida)):'sin fecha requerida'}</span>
+                <span>{timeAgo(s.created_at)}</span>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================================
+   Detalle de solicitud
+============================================================================ */
+function SolicitarCambioModal({item, onClose, onDone}){
+  const [cantidad,setCantidad] = useState(item.cantidad_aprobada ?? item.cantidad_solicitada);
+  const [motivo,setMotivo] = useState('');
+  const [error,setError] = useState('');
+  const [enviando,setEnviando] = useState(false);
+  const enviar = async () => {
+    setError('');
+    if(!motivo.trim()){ setError('El motivo es obligatorio.'); return; }
+    if(Number(cantidad)<=0){ setError('La cantidad debe ser mayor a 0.'); return; }
+    setEnviando(true);
+    const { error: e } = await sb.rpc('solicitar_cambio', { p_item_id: item.id, p_cantidad_propuesta: Number(cantidad), p_motivo: motivo.trim() });
+    setEnviando(false);
+    if(e){ setError(e.message); return; }
+    onDone();
+  };
+  return (
+    <Modal title={`Solicitar cambio — ${item.descripcion}`} onClose={onClose}>
+      <ErrorBanner error={error}/>
+      <p className="text-sm text-[#B4B9C6] mb-3">Cantidad aprobada actual: <strong className="text-[#EDEFF3]">{item.cantidad_aprobada} {item.unidad}</strong></p>
+      <Field label="Nueva cantidad" required><input type="number" min="0" step="0.01" className={inputCls} value={cantidad} onChange={e=>setCantidad(e.target.value)}/></Field>
+      <Field label="Motivo del cambio" required><textarea className={inputCls} rows={3} value={motivo} onChange={e=>setMotivo(e.target.value)} placeholder="Ej. Nos equivocamos al medir, se necesitan 30 en vez de 20."/></Field>
+      <div className="flex justify-end gap-2 mt-2">
+        <button disabled={enviando} onClick={onClose} className={btnGhost}>Cancelar</button>
+        <button disabled={enviando} onClick={enviar} className={btnPrimary}>Enviar a gerente</button>
+      </div>
+    </Modal>
+  );
+}
+
+function RechazarModal({onClose, onConfirm}){
+  const [motivo,setMotivo] = useState('');
+  const [error,setError] = useState('');
+  return (
+    <Modal title="Rechazar solicitud" onClose={onClose}>
+      <ErrorBanner error={error}/>
+      <Field label="Motivo del rechazo" required><textarea className={inputCls} rows={3} value={motivo} onChange={e=>setMotivo(e.target.value)}/></Field>
+      <div className="flex justify-end gap-2">
+        <button onClick={onClose} className={btnGhost}>Cancelar</button>
+        <button onClick={()=>{ if(!motivo.trim()){ setError('El motivo es obligatorio.'); return; } onConfirm(motivo.trim()); }} className={btnDanger}>Rechazar</button>
+      </div>
+    </Modal>
+  );
+}
+
+const EVENTO_ICONO = {
+  creada:'📝', enviada:'📤', aprobada:'✅', rechazada:'⛔', comentario:'💬',
+  cambio_solicitado:'✏️', cambio_aprobado:'✅', cambio_rechazado:'⛔',
+  en_proceso:'⚙️', atendida:'📦', cerrada:'🔒',
+};
+
+function SolicitudDetalle({profile, solicitudId, perfilesPorId, obrasPorId, onVolver, onCambio}){
+  const [sol,setSol] = useState(null);
+  const [items,setItems] = useState([]);
+  const [cambios,setCambios] = useState([]);
+  const [eventos,setEventos] = useState([]);
+  const [cargando,setCargando] = useState(true);
+  const [error,setError] = useState('');
+  const [comentario,setComentario] = useState('');
+  const [itemsEditables,setItemsEditables] = useState({});
+  const [modalCambio,setModalCambio] = useState(null);
+  const [modalRechazo,setModalRechazo] = useState(false);
+  const [ocupado,setOcupado] = useState(false);
+
+  const cargar = useCallback(async ()=>{
+    setCargando(true);
+    const [{data:s},{data:it},{data:cs},{data:ev}] = await Promise.all([
+      sb.from('solicitudes').select('*').eq('id', solicitudId).maybeSingle(),
+      sb.from('solicitud_items').select('*').eq('solicitud_id', solicitudId).order('created_at'),
+      sb.from('cambios_solicitados').select('*').eq('solicitud_id', solicitudId).order('created_at', {ascending:false}),
+      sb.from('eventos').select('*').eq('solicitud_id', solicitudId).order('created_at'),
+    ]);
+    setSol(s||null); setItems(it||[]); setCambios(cs||[]); setEventos(ev||[]);
+    setItemsEditables({});
+    setCargando(false);
+  }, [solicitudId]);
+
+  useEffect(()=>{ cargar(); }, [cargar]);
+  useEffect(()=>{
+    const ch = sb.channel('detalle-'+solicitudId)
+      .on('postgres_changes', {event:'*', schema:'public', table:'solicitudes', filter:`id=eq.${solicitudId}`}, cargar)
+      .on('postgres_changes', {event:'*', schema:'public', table:'solicitud_items', filter:`solicitud_id=eq.${solicitudId}`}, cargar)
+      .on('postgres_changes', {event:'*', schema:'public', table:'cambios_solicitados', filter:`solicitud_id=eq.${solicitudId}`}, cargar)
+      .on('postgres_changes', {event:'*', schema:'public', table:'eventos', filter:`solicitud_id=eq.${solicitudId}`}, cargar)
+      .subscribe();
+    return ()=>{ sb.removeChannel(ch); };
+  }, [solicitudId, cargar]);
+
+  if(cargando) return <div className="text-center text-[#5C6376] py-10 text-sm">Cargando…</div>;
+  if(!sol) return <div className="text-center text-[#5C6376] py-10 text-sm">No se encontró la solicitud (o no tienes acceso a verla todavía).</div>;
+
+  const obra = obrasPorId[sol.obra_id];
+  const solicitante = perfilesPorId[sol.solicitante_id];
+  const esDueño = sol.solicitante_id===profile.id;
+  const esGerente = ['gerente_operaciones','admin'].includes(profile.role);
+  const esLogistica = ['logistica','admin'].includes(profile.role);
+  const cambiosPendientes = cambios.filter(c=>c.estado==='pendiente');
+
+  const accion = async (fn) => { setError(''); setOcupado(true); const {error:e} = await fn(); setOcupado(false); if(e) setError(e.message); };
+
+  const enviar = () => accion(()=>sb.rpc('enviar_solicitud', {p_solicitud_id: sol.id}));
+  const aprobar = () => accion(async ()=>{
+    const ajustes = Object.entries(itemsEditables).map(([item_id, cantidad_aprobada])=>({item_id, cantidad_aprobada:Number(cantidad_aprobada)}));
+    return sb.rpc('aprobar_solicitud', {p_solicitud_id: sol.id, p_items: ajustes.length?ajustes:null});
+  });
+  const rechazar = (motivo) => accion(()=>sb.rpc('rechazar_solicitud', {p_solicitud_id: sol.id, p_motivo: motivo})).then(()=>setModalRechazo(false));
+  const resolverCambio = (id, decision) => accion(()=>sb.rpc('resolver_cambio', {p_cambio_id:id, p_decision:decision}));
+  const marcarEstado = (estado) => accion(()=>sb.rpc('marcar_estado_logistica', {p_solicitud_id: sol.id, p_estado: estado}));
+  const enviarComentario = async () => {
+    if(!comentario.trim()) return;
+    setOcupado(true);
+    const { error:e } = await sb.rpc('comentar_solicitud', {p_solicitud_id: sol.id, p_mensaje: comentario.trim()});
+    setOcupado(false);
+    if(e) setError(e.message); else setComentario('');
+  };
+
+  const timeline = [
+    ...eventos.map(ev=>({ ...ev, _fecha:ev.created_at })),
+  ].sort((a,b)=>new Date(a._fecha)-new Date(b._fecha));
+
+  return (
+    <div>
+      <button onClick={onVolver} className="text-xs text-[#8B92A5] hover:text-[#E1602A] mb-3">← Volver al listado</button>
+      <ErrorBanner error={error}/>
+      <div className="bg-[#141821] border border-[#232838] rounded-xl p-5 mb-4">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+          <h2 className="font-display text-lg font-bold text-[#EDEFF3]">Solicitud N°{sol.numero} — {obra?obra.nombre:'—'}</h2>
+          <EstadoBadge estado={sol.estado}/>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-3 text-sm">
+          <div><p className="text-[10px] uppercase text-[#5C6376]">Solicitante</p><p className="text-[#DADDE5]">{solicitante?(solicitante.full_name||solicitante.email):'—'}</p></div>
+          <div><p className="text-[10px] uppercase text-[#5C6376]">Tipo</p><p className="text-[#DADDE5] capitalize">{sol.tipo}</p></div>
+          <div><p className="text-[10px] uppercase text-[#5C6376]">Fecha requerida</p><p className="text-[#DADDE5]">{fmtDate(sol.fecha_requerida)}</p></div>
+          <div><p className="text-[10px] uppercase text-[#5C6376]">Creada</p><p className="text-[#DADDE5]">{timeAgo(sol.created_at)}</p></div>
+        </div>
+        {sol.estado==='rechazada' && sol.motivo_rechazo && (
+          <div className="mt-3 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-sm">Motivo de rechazo: {sol.motivo_rechazo}</div>
+        )}
+
+        {/* Acciones por rol / estado */}
+        <div className="flex flex-wrap gap-2 mt-4">
+          {esDueño && ['borrador','rechazada'].includes(sol.estado) && (
+            <button disabled={ocupado} onClick={enviar} className={btnPrimary}>📤 Enviar a revisión</button>
+          )}
+          {esGerente && sol.estado==='enviada' && (
+            <>
+              <button disabled={ocupado} onClick={aprobar} className={btnPrimary}>✅ Aprobar</button>
+              <button disabled={ocupado} onClick={()=>setModalRechazo(true)} className={btnDanger}>⛔ Rechazar</button>
+            </>
+          )}
+          {esLogistica && sol.estado==='aprobada' && <button disabled={ocupado} onClick={()=>marcarEstado('en_proceso')} className={btnGhost}>⚙️ Marcar en proceso</button>}
+          {esLogistica && sol.estado==='en_proceso' && <button disabled={ocupado} onClick={()=>marcarEstado('atendida')} className={btnGhost}>📦 Marcar atendida</button>}
+          {esLogistica && sol.estado==='atendida' && <button disabled={ocupado} onClick={()=>marcarEstado('cerrada')} className={btnGhost}>🔒 Cerrar solicitud</button>}
+        </div>
+      </div>
+
+      {/* Ítems */}
+      <div className="bg-[#141821] border border-[#232838] rounded-xl p-5 mb-4 overflow-x-auto">
+        <h3 className="font-display font-semibold text-[#EDEFF3] mb-3">Ítems</h3>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-[10px] uppercase text-[#5C6376] border-b border-[#232838]">
+              <th className="py-2 pr-2">Descripción</th><th className="pr-2">Categoría</th><th className="pr-2">Solicitado</th><th className="pr-2">Aprobado</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map(it=>{
+              const puedeAjustarAlAprobar = esGerente && sol.estado==='enviada';
+              const puedeCambio = esDueño && ['aprobada','en_proceso'].includes(sol.estado);
+              return (
+                <tr key={it.id} className="border-b border-[#1C2130]">
+                  <td className="py-2 pr-2 text-[#DADDE5]">{it.item_codigo && <span className="font-mono text-[#5C6376]">[{it.item_codigo}] </span>}{it.descripcion}</td>
+                  <td className="pr-2 text-[#8B92A5]">{it.categoria||'—'}</td>
+                  <td className="pr-2 text-[#DADDE5]">{it.cantidad_solicitada} {it.unidad}</td>
+                  <td className="pr-2">
+                    {puedeAjustarAlAprobar ? (
+                      <input type="number" min="0" step="0.01" className={inputCls+' w-24'}
+                        defaultValue={it.cantidad_aprobada ?? it.cantidad_solicitada}
+                        onChange={e=>setItemsEditables(prev=>({...prev, [it.id]: e.target.value}))}/>
+                    ) : (
+                      <span className="text-[#DADDE5]">{it.cantidad_aprobada ?? '—'} {it.cantidad_aprobada!=null?it.unidad:''}</span>
+                    )}
+                  </td>
+                  <td className="text-right">
+                    {puedeCambio && <button onClick={()=>setModalCambio(it)} className="text-xs text-[#E1602A] hover:underline">Solicitar cambio</button>}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Cambios pendientes de aprobación */}
+      {cambiosPendientes.length>0 && (
+        <div className="bg-amber-500/5 border border-amber-500/30 rounded-xl p-5 mb-4">
+          <h3 className="font-display font-semibold text-amber-300 mb-3">⚠️ Cambios de cantidad pendientes</h3>
+          {cambiosPendientes.map(c=>{
+            const item = items.find(i=>i.id===c.item_id);
+            const quien = perfilesPorId[c.solicitado_por];
+            return (
+              <div key={c.id} className="flex flex-wrap items-center justify-between gap-2 py-2 border-b border-amber-500/20 last:border-0">
+                <div className="text-sm text-[#DADDE5]">
+                  <strong>{item?item.descripcion:'ítem'}</strong>: {c.cantidad_actual} → <strong className="text-amber-300">{c.cantidad_propuesta}</strong> {item?.unidad}
+                  <p className="text-xs text-[#8B92A5]">Motivo: {c.motivo} — pedido por {quien?(quien.full_name||quien.email):'—'}</p>
+                </div>
+                {esGerente && (
+                  <div className="flex gap-2">
+                    <button disabled={ocupado} onClick={()=>resolverCambio(c.id,'aprobado')} className={btnPrimary}>Aprobar cambio</button>
+                    <button disabled={ocupado} onClick={()=>resolverCambio(c.id,'rechazado')} className={btnGhost}>Rechazar</button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Línea de tiempo */}
+      <div className="bg-[#141821] border border-[#232838] rounded-xl p-5">
+        <h3 className="font-display font-semibold text-[#EDEFF3] mb-3">Actividad</h3>
+        <div className="space-y-3 mb-4">
+          {timeline.map(ev=>{
+            const autor = perfilesPorId[ev.usuario_id];
+            return (
+              <div key={ev.id} className="flex gap-2 text-sm">
+                <span>{EVENTO_ICONO[ev.tipo]||'•'}</span>
+                <div>
+                  <p className="text-[#DADDE5]">{ev.mensaje}</p>
+                  <p className="text-[11px] text-[#5C6376]">{autor?(autor.full_name||autor.email):'Sistema'} · {timeAgo(ev.created_at)}</p>
+                </div>
+              </div>
+            );
+          })}
+          {timeline.length===0 && <p className="text-sm text-[#5C6376]">Sin actividad todavía.</p>}
+        </div>
+        <div className="flex gap-2">
+          <input className={inputCls} placeholder="Escribe un comentario…" value={comentario} onChange={e=>setComentario(e.target.value)}
+            onKeyDown={e=>{ if(e.key==='Enter') enviarComentario(); }}/>
+          <button disabled={ocupado} onClick={enviarComentario} className={btnGhost}>Comentar</button>
+        </div>
+      </div>
+
+      {modalCambio && <SolicitarCambioModal item={modalCambio} onClose={()=>setModalCambio(null)} onDone={()=>{setModalCambio(null); cargar();}}/>}
+      {modalRechazo && <RechazarModal onClose={()=>setModalRechazo(false)} onConfirm={rechazar}/>}
+    </div>
+  );
+}
+
+/* ============================================================================
+   Usuarios y roles (solo admin / logística)
+============================================================================ */
+function UsuariosView({profile, perfiles, obras, recargarCatalogos}){
+  const [asignaciones,setAsignaciones] = useState({}); // obra_id -> Set(user_id)
+  const [error,setError] = useState('');
+  const esAdmin = profile.role==='admin';
+
+  const cargarAsignaciones = useCallback(async ()=>{
+    const { data } = await sb.from('obra_usuarios').select('*');
+    const map = {};
+    (data||[]).forEach(row=>{ (map[row.obra_id] ||= new Set()).add(row.user_id); });
+    setAsignaciones(map);
+  }, []);
+  useEffect(()=>{ cargarAsignaciones(); }, [cargarAsignaciones]);
+
+  const cambiarRol = async (userId, role) => {
+    setError('');
+    const { error: e } = await sb.from('profiles').update({role}).eq('id', userId);
+    if(e) setError(e.message); else recargarCatalogos();
+  };
+  const toggleObra = async (obraId, userId, asignado) => {
+    setError('');
+    const { error: e } = asignado
+      ? await sb.from('obra_usuarios').delete().eq('obra_id', obraId).eq('user_id', userId)
+      : await sb.from('obra_usuarios').insert({obra_id: obraId, user_id: userId});
+    if(e) setError(e.message); else cargarAsignaciones();
+  };
+
+  const residentes = perfiles.filter(p=>p.role==='residente');
+
+  return (
+    <div>
+      <ErrorBanner error={error}/>
+      <div className="bg-[#141821] border border-[#232838] rounded-xl p-5 mb-4 overflow-x-auto">
+        <h3 className="font-display font-semibold text-[#EDEFF3] mb-3">Usuarios y roles</h3>
+        <table className="w-full text-sm">
+          <thead><tr className="text-left text-[10px] uppercase text-[#5C6376] border-b border-[#232838]">
+            <th className="py-2 pr-2">Nombre</th><th className="pr-2">Correo</th><th className="pr-2">Rol</th>
+          </tr></thead>
+          <tbody>
+            {perfiles.map(p=>(
+              <tr key={p.id} className="border-b border-[#1C2130]">
+                <td className="py-2 pr-2 text-[#DADDE5]">{p.full_name||'—'}</td>
+                <td className="pr-2 text-[#8B92A5]">{p.email}</td>
+                <td className="pr-2">
+                  <select disabled={!esAdmin} className={inputCls+' w-56'} value={p.role} onChange={e=>cambiarRol(p.id, e.target.value)}>
+                    {ROLES.map(r=><option key={r} value={r}>{ROLE_LABEL[r]}</option>)}
+                  </select>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!esAdmin && <p className="text-xs text-[#5C6376] mt-2">Solo un administrador puede cambiar roles.</p>}
+        <p className="text-xs text-[#5C6376] mt-2">Para dar de alta una cuenta nueva, invítala desde el panel de Supabase (Authentication → Users → Invite). Al iniciar sesión por primera vez se le crea aquí automáticamente con rol "Residente".</p>
+      </div>
+
+      <div className="bg-[#141821] border border-[#232838] rounded-xl p-5 overflow-x-auto">
+        <h3 className="font-display font-semibold text-[#EDEFF3] mb-1">Asignación de residentes a obras</h3>
+        <p className="text-xs text-[#5C6376] mb-3">Un residente solo puede crear solicitudes para las obras marcadas aquí.</p>
+        {obras.length===0 && <p className="text-sm text-[#5C6376]">Aún no hay obras cargadas — agrégalas desde el SQL Editor de Supabase (tabla "obras").</p>}
+        {obras.map(o=>(
+          <div key={o.id} className="mb-3">
+            <p className="text-sm font-medium text-[#DADDE5] mb-1">{o.codigo} — {o.nombre}</p>
+            <div className="flex flex-wrap gap-2">
+              {residentes.map(r=>{
+                const asignado = asignaciones[o.id]?.has(r.id);
+                return (
+                  <button key={r.id} onClick={()=>toggleObra(o.id, r.id, asignado)}
+                    className={`px-2 py-1 rounded-md text-xs border ${asignado?'bg-[#E1602A]/10 border-[#E1602A]/40 text-[#E1602A]':'border-[#2E3547] text-[#8B92A5] hover:bg-white/5'}`}>
+                    {r.full_name||r.email}
+                  </button>
+                );
+              })}
+              {residentes.length===0 && <span className="text-xs text-[#5C6376]">No hay residentes registrados todavía.</span>}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================================
+   Shell: sidebar + topbar
+============================================================================ */
+const MODULOS = [
+  {id:'solicitudes', label:'Solicitudes de Materiales', icon:'📋', disponible:true},
+  {id:'usuarios', label:'Usuarios y roles', icon:'👥', disponible:true, soloAdmin:true},
+  {id:'cantera', label:'Proveedores & OC (Cantera)', icon:'🧱', disponible:false, href:'../index.html'},
+  {id:'finanzas', label:'Finanzas', icon:'💵', disponible:false},
+  {id:'rrhh', label:'Recursos Humanos', icon:'🧑‍💼', disponible:false},
+];
+
+function Sidebar({view, setView, profile}){
+  return (
+    <div className="w-64 shrink-0 bg-[#0D1119] border-r border-[#1C2130] min-h-screen p-4">
+      <h1 className="font-display font-bold text-[#EDEFF3] text-lg mb-1">ERP</h1>
+      <p className="text-[11px] text-[#5C6376] mb-6">Plataforma interna — módulos irán sumándose aquí.</p>
+      <nav className="space-y-1">
+        {MODULOS.filter(m=>!m.soloAdmin || ['admin','logistica'].includes(profile.role)).map(m=>(
+          m.disponible ? (
+            <button key={m.id} onClick={()=>setView(m.id)}
+              className={`w-full text-left px-3 py-2 rounded-lg text-sm flex items-center gap-2 ${view===m.id?'bg-[#E1602A]/10 text-[#E1602A]':'text-[#B4B9C6] hover:bg-white/5'}`}>
+              <span>{m.icon}</span>{m.label}
+            </button>
+          ) : (
+            <a key={m.id} href={m.href||'#'} title={m.href?'Ir a Cantera':'Próximamente'}
+              className="w-full text-left px-3 py-2 rounded-lg text-sm flex items-center gap-2 text-[#5C6376] hover:bg-white/5">
+              <span>{m.icon}</span>{m.label}{!m.href && <span className="ml-auto text-[10px] uppercase">Próx.</span>}
+            </a>
+          )
+        ))}
+      </nav>
+    </div>
+  );
+}
+
+function Topbar({profile, notifs, onAbrirSolicitud, onLogout}){
+  return (
+    <div className="flex items-center justify-between px-6 py-4 border-b border-[#1C2130]">
+      <div>
+        <p className="text-sm text-[#DADDE5]">{profile.full_name||profile.email}</p>
+        <RolBadge rol={profile.role}/>
+      </div>
+      <div className="flex items-center gap-3">
+        <NotifBell notifs={notifs} onAbrirSolicitud={onAbrirSolicitud}/>
+        <button onClick={onLogout} className={btnGhost}>Salir</button>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================================
+   App raíz
+============================================================================ */
+function App(){
+  const [session,setSession] = useState(undefined);
+  useEffect(()=>{
+    sb.auth.getSession().then(({data})=>setSession(data.session));
+    const { data: listener } = sb.auth.onAuthStateChange((_e, sess)=>setSession(sess));
+    return ()=>listener.subscription.unsubscribe();
+  }, []);
+
+  const [profile] = useProfile(session);
+  const { obras, perfiles, perfilesPorId, recargar: recargarCatalogos } = useCatalogos(session);
+  const notifs = useNotificaciones(profile?.id);
+  const { solicitudes, loading, recargar: recargarSolicitudes } = useSolicitudes(profile);
+  const misObraIds = useMisObraIds(profile);
+
+  const [view,setView] = useState('solicitudes');
+  const [detalleId,setDetalleId] = useState(null);
+  const [mostrarNueva,setMostrarNueva] = useState(false);
+
+  if(session===undefined) return <div className="min-h-screen flex items-center justify-center text-[#5C6376]">Cargando…</div>;
+  if(!session) return <AuthScreen/>;
+  if(profile===undefined) return <div className="min-h-screen flex items-center justify-center text-[#5C6376]">Cargando tu perfil…</div>;
+  if(profile===null) return (
+    <div className="min-h-screen flex items-center justify-center text-center px-4">
+      <div>
+        <p className="text-[#DADDE5] mb-3">Tu cuenta inició sesión pero aún no tiene un perfil en el ERP.</p>
+        <button onClick={()=>sb.auth.signOut()} className={btnGhost}>Cerrar sesión e intentar de nuevo</button>
+      </div>
+    </div>
+  );
+
+  const obrasPorId = Object.fromEntries(obras.map(o=>[o.id,o]));
+  const obrasDelResidente = profile.role==='admin' ? obras : obras.filter(o=>misObraIds.has(o.id));
+
+  const abrirSolicitud = (id) => { setDetalleId(id); setView('solicitudes'); };
+
+  return (
+    <div className="flex">
+      <Sidebar view={view} setView={(v)=>{ setView(v); setDetalleId(null); }} profile={profile}/>
+      <div className="flex-1 min-h-screen">
+        <Topbar profile={profile} notifs={notifs} onAbrirSolicitud={abrirSolicitud} onLogout={()=>sb.auth.signOut()}/>
+        <div className="p-6">
+          {view==='solicitudes' && (
+            detalleId ? (
+              <SolicitudDetalle profile={profile} solicitudId={detalleId} perfilesPorId={perfilesPorId} obrasPorId={obrasPorId}
+                onVolver={()=>setDetalleId(null)}/>
+            ) : (
+              <SolicitudesListView profile={profile} solicitudes={solicitudes} loading={loading}
+                obrasPorId={obrasPorId} perfilesPorId={perfilesPorId}
+                onAbrir={setDetalleId} onNueva={()=>setMostrarNueva(true)}/>
+            )
+          )}
+          {view==='usuarios' && <UsuariosView profile={profile} perfiles={perfiles} obras={obras} recargarCatalogos={recargarCatalogos}/>}
+        </div>
+      </div>
+      {mostrarNueva && (
+        <NuevaSolicitudModal profile={profile} obrasDisponibles={obrasDelResidente}
+          onClose={()=>setMostrarNueva(false)}
+          onCreated={(id)=>{ setMostrarNueva(false); recargarSolicitudes(); setDetalleId(id); }}/>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
